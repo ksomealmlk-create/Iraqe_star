@@ -1,0 +1,96 @@
+name: Build APK (Godot + C++)
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      GODOT_VERSION: "4.3"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract project from the uploaded ZIP
+        run: |
+          ZIP=$(ls *.zip | head -1)
+          unzip -q "$ZIP" -d work
+          P=$(dirname "$(find work -name project.godot -not -path '*/godot-cpp/*' | head -1)")
+          cp -a "$P"/. .
+          ls
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install SCons
+        run: pip install scons
+
+      - name: Android SDK + NDK r23c
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platform-tools" "build-tools;34.0.0" "platforms;android-34" "cmdline-tools;latest" "ndk;23.2.8568313"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/23.2.8568313" >> $GITHUB_ENV
+
+      - name: Get godot-cpp
+        run: |
+          git clone --depth 1 --branch godot-4.3-stable https://github.com/godotengine/godot-cpp.git
+          touch godot-cpp/.gdignore
+
+      - name: Build C++ (Linux editor lib)
+        run: scons platform=linux arch=x86_64 target=template_debug -j$(nproc)
+
+      - name: Build C++ (Android arm64 release)
+        run: scons platform=android arch=arm64 target=template_release -j$(nproc)
+
+      - name: Install Godot 4.3 + export templates
+        run: |
+          wget -q https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip
+          wget -q https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz
+          unzip -q Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip
+          sudo mv Godot_v${GODOT_VERSION}-stable_linux.x86_64 /usr/local/bin/godot
+          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          unzip -q Godot_v${GODOT_VERSION}-stable_export_templates.tpz -d /tmp/tpl
+          mv /tmp/tpl/templates/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
+          rm -f Godot_v${GODOT_VERSION}-stable_*
+
+      - name: Keystore + editor settings
+        run: |
+          keytool -genkeypair -v -keystore $HOME/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          mkdir -p ~/.config/godot
+          cat > ~/.config/godot/editor_settings-4.3.tres <<EOT
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/debug_keystore = "$HOME/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOT
+
+      - name: Import + export APK
+        env:
+          GODOT_ANDROID_KEYSTORE_RELEASE_PATH: /home/runner/debug.keystore
+          GODOT_ANDROID_KEYSTORE_RELEASE_USER: androiddebugkey
+          GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD: android
+        run: |
+          mkdir -p .godot build
+          echo "res://nujoom.gdextension" > .godot/extension_list.cfg
+          touch build/.gdignore
+          godot --headless --path . --import || true
+          godot --headless --path . --import || true
+          godot --headless --path . --export-release "Android" build/nujoom.apk
+          ls -la build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nujoom-iraq-apk
+          path: build/nujoom.apk
