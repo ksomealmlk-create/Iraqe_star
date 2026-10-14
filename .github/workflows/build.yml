@@ -16,10 +16,14 @@ jobs:
       - name: Extract project from the uploaded ZIP
         run: |
           ZIP=$(ls *.zip | head -1)
-          unzip -q "$ZIP" -d work
-          P=$(dirname "$(find work -name project.godot -not -path '*/godot-cpp/*' | head -1)")
-          cp -a "$P"/. .
-          ls
+          mkdir -p /tmp/extract
+          unzip -q "$ZIP" -d /tmp/extract
+          PROJ=$(dirname "$(find /tmp/extract -name SConstruct | head -1)")
+          rsync -a --exclude ".github" "$PROJ"/ ./
+          ls -la
+
+      - name: Replace icon
+        run: cp new_icon.png icon.png
 
       - uses: actions/setup-java@v4
         with:
