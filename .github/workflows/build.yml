@@ -81,6 +81,10 @@ jobs:
           # the .gdextension also lists a release library; reuse debug one so nothing is missing
           cp bin/libnujoom.android.template_debug.arm64.so bin/libnujoom.android.template_release.arm64.so
           ls -la bin
+          echo "--- library info ---"
+          file bin/libnujoom.android.template_debug.arm64.so
+          readelf -d bin/libnujoom.android.template_debug.arm64.so | grep -E "NEEDED|SONAME" || true
+          nm -D bin/libnujoom.android.template_debug.arm64.so | grep -c nujoom_init || true
 
       # save the compile cache even if a later step fails, so a rerun resumes fast
       - name: Save godot-cpp cache
@@ -170,7 +174,15 @@ jobs:
           extends Node
 
           func _ready():
+              var lines = []
+              lines.append("Godot " + str(Engine.get_version_info()["string"]))
+              lines.append("list file: " + str(FileAccess.file_exists("res://.godot/extension_list.cfg")))
               var ok = ClassDB.class_exists("NujoomGame")
+              if not ok:
+                  var st = GDExtensionManager.load_extension("res://nujoom.gdextension")
+                  lines.append("manual load status: " + str(st) + " (0 OK, 1 FAILED, 2 ALREADY, 3 NOT_LOADED, 4 RESTART)")
+                  ok = ClassDB.class_exists("NujoomGame")
+              lines.append("extensions: " + str(GDExtensionManager.get_loaded_extensions()))
               var info = Label.new()
               info.add_theme_font_size_override("font_size", 34)
               info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -178,14 +190,13 @@ jobs:
               info.position = Vector2(30, 60)
               info.z_index = 4000
               if ok:
-                  var g = ClassDB.instantiate("NujoomGame")
-                  add_child(g)
-                  info.text = "C++ OK"
+                  add_child(ClassDB.instantiate("NujoomGame"))
+                  info.text = "C++ OK\n" + "\n".join(lines)
                   add_child(info)
-                  await get_tree().create_timer(4.0).timeout
+                  await get_tree().create_timer(6.0).timeout
                   info.queue_free()
               else:
-                  info.text = "NujoomGame NOT found\next: " + str(GDExtensionManager.get_loaded_extensions()) + "\next file: " + str(FileAccess.file_exists("res://nujoom.gdextension")) + "\nlib file: " + str(FileAccess.file_exists("res://bin/libnujoom.android.template_debug.arm64.so"))
+                  info.text = "NujoomGame NOT found\n" + "\n".join(lines)
                   add_child(info)
           EOT
           cat > boot.tscn <<'EOT'
