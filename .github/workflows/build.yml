@@ -2,7 +2,15 @@ name: Build APK (Godot + C++)
 
 on:
   push:
+    paths-ignore:
+      - 'server/**'
+      - '.github/workflows/deploy-worker.yml'
+      - 'README.md'
   workflow_dispatch:
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -10,20 +18,9 @@ jobs:
     timeout-minutes: 60
     env:
       GODOT_VERSION: "4.3"
+      NDK_VERSION: "23.2.8568313"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Extract project from the uploaded ZIP
-        run: |
-          ZIP=$(ls *.zip | head -1)
-          mkdir -p /tmp/extract
-          unzip -q "$ZIP" -d /tmp/extract
-          PROJ=$(dirname "$(find /tmp/extract -name SConstruct | head -1)")
-          rsync -a --exclude ".github" "$PROJ"/ ./
-          ls -la
-
-      - name: Replace icon
-        run: cp new_icon.png icon.png
 
       - uses: actions/setup-java@v4
         with:
@@ -37,16 +34,43 @@ jobs:
       - name: Install SCons
         run: pip install scons
 
+      - name: Cache Android NDK
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/lib/android/sdk/ndk/${{ env.NDK_VERSION }}
+          key: ndk-${{ env.NDK_VERSION }}
+
       - name: Android SDK + NDK r23c
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platform-tools" "build-tools;34.0.0" "platforms;android-34" "cmdline-tools;latest" "ndk;23.2.8568313"
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/23.2.8568313" >> $GITHUB_ENV
+          if [ ! -d "$ANDROID_HOME/ndk/$NDK_VERSION" ]; then
+            $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;$NDK_VERSION"
+          fi
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" || true
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
+
+      - name: Cache godot-cpp
+        uses: actions/cache@v4
+        with:
+          path: godot-cpp
+          key: godot-cpp-${{ env.GODOT_VERSION }}-v1
 
       - name: Get godot-cpp
         run: |
-          git clone --depth 1 --branch godot-4.3-stable https://github.com/godotengine/godot-cpp.git
+          if [ ! -f godot-cpp/SConstruct ]; then
+            git clone --depth 1 --branch godot-$GODOT_VERSION-stable https://github.com/godotengine/godot-cpp.git
+          fi
           touch godot-cpp/.gdignore
+
+      - name: Cache game objects
+        uses: actions/cache@v4
+        with:
+          path: |
+            .sconsign.dblite
+            src/**/*.os
+            src/**/*.o
+          key: game-obj-${{ github.sha }}
+          restore-keys: game-obj-
 
       - name: Build C++ (Linux editor lib)
         run: scons platform=linux arch=x86_64 target=template_debug -j$(nproc)
@@ -54,16 +78,31 @@ jobs:
       - name: Build C++ (Android arm64 release)
         run: scons platform=android arch=arm64 target=template_release -j$(nproc)
 
-      - name: Install Godot 4.3 + export templates
+      - name: Cache Godot + export templates
+        id: cache-godot
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/godot-bin
+            ~/.local/share/godot/export_templates
+          key: godot-${{ env.GODOT_VERSION }}-templates-v1
+
+      - name: Install Godot + export templates
+        if: steps.cache-godot.outputs.cache-hit != 'true'
         run: |
+          mkdir -p ~/godot-bin
           wget -q https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip
           wget -q https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz
           unzip -q Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip
-          sudo mv Godot_v${GODOT_VERSION}-stable_linux.x86_64 /usr/local/bin/godot
+          mv Godot_v${GODOT_VERSION}-stable_linux.x86_64 ~/godot-bin/godot
+          chmod +x ~/godot-bin/godot
           mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
           unzip -q Godot_v${GODOT_VERSION}-stable_export_templates.tpz -d /tmp/tpl
           mv /tmp/tpl/templates/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
           rm -f Godot_v${GODOT_VERSION}-stable_*
+
+      - name: Add Godot to PATH
+        run: echo "$HOME/godot-bin" >> $GITHUB_PATH
 
       - name: Keystore + editor settings
         run: |
