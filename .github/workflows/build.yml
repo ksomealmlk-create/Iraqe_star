@@ -58,12 +58,15 @@ jobs:
       - name: Android SDK + NDK (use preinstalled)
         run: |
           export ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}
-          NDK=$(ls -d $ANDROID_HOME/ndk/25.* 2>/dev/null | head -n1)
-          if [ -z "$NDK" ]; then NDK=$(ls -d $ANDROID_HOME/ndk/* | sort -V | tail -n1); fi
-          echo "Using NDK: $NDK"
+          WANT=23.2.8568313
+          if [ ! -d "$ANDROID_HOME/ndk/$WANT/toolchains/llvm/prebuilt/linux-x86_64" ]; then
+            NDK=$(ls -d $ANDROID_HOME/ndk/* | sort -V | head -n1)
+            echo "Linking $NDK as $WANT (godot-cpp 4.3 looks for this exact name)"
+            sudo ln -sfn "$NDK" "$ANDROID_HOME/ndk/$WANT"
+          fi
+          ls -la $ANDROID_HOME/ndk/
           echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$NDK" >> $GITHUB_ENV
-          ls $ANDROID_HOME/build-tools $ANDROID_HOME/platforms || true
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$WANT" >> $GITHUB_ENV
 
       - name: Get godot-cpp (only if not cached)
         run: |
