@@ -164,6 +164,41 @@ jobs:
           EOT
           sed -i 's/^ *//' export_presets.cfg
 
+      - name: Add boot scene (shows on-screen status if the C++ extension fails)
+        run: |
+          cat > boot.gd <<'EOT'
+          extends Node
+
+          func _ready():
+              var ok = ClassDB.class_exists("NujoomGame")
+              var info = Label.new()
+              info.add_theme_font_size_override("font_size", 34)
+              info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+              info.size = Vector2(900, 600)
+              info.position = Vector2(30, 60)
+              info.z_index = 4000
+              if ok:
+                  var g = ClassDB.instantiate("NujoomGame")
+                  add_child(g)
+                  info.text = "C++ OK"
+                  add_child(info)
+                  await get_tree().create_timer(4.0).timeout
+                  info.queue_free()
+              else:
+                  info.text = "NujoomGame NOT found\next: " + str(GDExtensionManager.get_loaded_extensions()) + "\next file: " + str(FileAccess.file_exists("res://nujoom.gdextension")) + "\nlib file: " + str(FileAccess.file_exists("res://bin/libnujoom.android.template_debug.arm64.so"))
+                  add_child(info)
+          EOT
+          cat > boot.tscn <<'EOT'
+          [gd_scene load_steps=2 format=3]
+
+          [ext_resource type="Script" path="res://boot.gd" id="1"]
+
+          [node name="Boot" type="Node"]
+          script = ExtResource("1")
+          EOT
+          sed -i 's#^run/main_scene=.*#run/main_scene="res://boot.tscn"#' project.godot
+          grep main_scene project.godot
+
       - name: Import + Export APK
         run: |
           export PATH=$HOME/godot-bin:$PATH
