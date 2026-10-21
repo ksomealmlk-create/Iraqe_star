@@ -2,111 +2,114 @@ name: Build APK (Godot + C++)
 
 on:
   push:
-    paths-ignore:
-      - 'server/**'
-      - '.github/workflows/deploy-worker.yml'
-      - 'README.md'
   workflow_dispatch:
 
-concurrency:
-  group: build-apk
-  cancel-in-progress: true
+env:
+  GODOT_VERSION: "4.3"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
-    env:
-      GODOT_VERSION: "4.3"
-      NDK_VERSION: "23.2.8568313"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Extract project from ZIP
+        run: |
+          if [ -f Iraqestar_online.zip ]; then Z=Iraqestar_online.zip; else Z=Iraqestar.zip; fi
+          echo "Using $Z"
+          unzip -o "$Z"
+          test -f nujoom.gdextension && test -f project.godot
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: 17
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install SCons
-        run: pip install scons
-
-      - name: Cache Android NDK
-        uses: actions/cache@v4
-        with:
-          path: /usr/local/lib/android/sdk/ndk/${{ env.NDK_VERSION }}
-          key: ndk-${{ env.NDK_VERSION }}
-
-      - name: Android SDK + NDK r23c
-        run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
-          if [ ! -d "$ANDROID_HOME/ndk/$NDK_VERSION" ]; then
-            $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;$NDK_VERSION"
-          fi
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" || true
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
-
-      - name: Cache godot-cpp
-        uses: actions/cache@v4
-        with:
-          path: godot-cpp
-          key: godot-cpp-${{ env.GODOT_VERSION }}-v1
-
-      - name: Get godot-cpp
-        run: |
-          if [ ! -f godot-cpp/SConstruct ]; then
-            git clone --depth 1 --branch godot-$GODOT_VERSION-stable https://github.com/godotengine/godot-cpp.git
-          fi
-          touch godot-cpp/.gdignore
-
-      - name: Cache game objects
-        uses: actions/cache@v4
+      # ---- Cache: godot-cpp compiled objects (the slowest part) ----
+      - name: Restore godot-cpp cache
+        uses: actions/cache/restore@v4
         with:
           path: |
+            godot-cpp
             .sconsign.dblite
-            src/**/*.os
-            src/**/*.o
-          key: game-obj-${{ github.sha }}
-          restore-keys: game-obj-
+          key: gdcpp-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: gdcpp-${{ runner.os }}-
 
-      - name: Build C++ (Linux editor lib)
-        run: scons platform=linux arch=x86_64 target=template_debug -j$(nproc)
-
-      - name: Build C++ (Android arm64 release)
-        run: scons platform=android arch=arm64 target=template_release -j$(nproc)
-
-      - name: Cache Godot + export templates
-        id: cache-godot
+      # ---- Cache: Godot editor + export templates ----
+      - name: Restore Godot cache
+        id: godot-cache
         uses: actions/cache@v4
         with:
           path: |
             ~/godot-bin
             ~/.local/share/godot/export_templates
-          key: godot-${{ env.GODOT_VERSION }}-templates-v1
+          key: godot-${{ env.GODOT_VERSION }}
+
+      - name: Install tools
+        run: |
+          python3 -m pip install scons
+          which convert >/dev/null || (sudo apt-get update && sudo apt-get install -y imagemagick)
+
+      - name: Android SDK + NDK (use preinstalled)
+        run: |
+          export ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}
+          NDK=$(ls -d $ANDROID_HOME/ndk/25.* 2>/dev/null | head -n1)
+          if [ -z "$NDK" ]; then NDK=$(ls -d $ANDROID_HOME/ndk/* | sort -V | tail -n1); fi
+          echo "Using NDK: $NDK"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$NDK" >> $GITHUB_ENV
+          ls $ANDROID_HOME/build-tools $ANDROID_HOME/platforms || true
+
+      - name: Get godot-cpp (only if not cached)
+        run: |
+          if [ ! -f godot-cpp/SConstruct ]; then
+            git clone --depth 1 -b ${GODOT_VERSION} https://github.com/godotengine/godot-cpp.git godot-cpp
+          fi
+
+      - name: Build C++ library (Android arm64, debug only)
+        run: |
+          mkdir -p bin
+          scons platform=android arch=arm64 target=template_debug -j$(nproc)
+          # the .gdextension also lists a release library; reuse debug one so nothing is missing
+          cp bin/libnujoom.android.template_debug.arm64.so bin/libnujoom.android.template_release.arm64.so
+          ls -la bin
+
+      # save the compile cache even if a later step fails, so a rerun resumes fast
+      - name: Save godot-cpp cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            godot-cpp
+            .sconsign.dblite
+          key: gdcpp-${{ runner.os }}-${{ github.run_id }}
 
       - name: Install Godot + export templates
-        if: steps.cache-godot.outputs.cache-hit != 'true'
+        if: steps.godot-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/godot-bin
-          wget -q https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip
-          wget -q https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz
+          wget -q https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip
+          wget -q https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz
           unzip -q Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip
           mv Godot_v${GODOT_VERSION}-stable_linux.x86_64 ~/godot-bin/godot
           chmod +x ~/godot-bin/godot
           mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
-          unzip -q Godot_v${GODOT_VERSION}-stable_export_templates.tpz -d /tmp/tpl
-          mv /tmp/tpl/templates/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
-          rm -f Godot_v${GODOT_VERSION}-stable_*
+          unzip -q Godot_v${GODOT_VERSION}-stable_export_templates.tpz -d tpl
+          mv tpl/templates/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
 
-      - name: Add Godot to PATH
-        run: echo "$HOME/godot-bin" >> $GITHUB_PATH
-
-      - name: Keystore + editor settings
+      - name: Icon (if missing)
         run: |
-          keytool -genkeypair -v -keystore $HOME/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          if [ -f new_icon.png ]; then cp new_icon.png icon.png; fi
+          if [ ! -f icon.png ]; then
+            convert -size 512x512 xc:'#050814' -fill '#ffd24a' -draw "circle 256,256 256,90" icon.png
+          fi
+
+      - name: Debug keystore + editor settings + export preset
+        run: |
+          keytool -genkeypair -keystore $HOME/debug.keystore -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
           mkdir -p ~/.config/godot
           cat > ~/.config/godot/editor_settings-4.3.tres <<EOT
           [gd_resource type="EditorSettings" format=3]
@@ -118,19 +121,48 @@ jobs:
           export/android/debug_keystore_user = "androiddebugkey"
           export/android/debug_keystore_pass = "android"
           EOT
+          sed -i 's/^ *//' ~/.config/godot/editor_settings-4.3.tres
+          cat > export_presets.cfg <<'EOT'
+          [preset.0]
 
-      - name: Import + export APK
-        env:
-          GODOT_ANDROID_KEYSTORE_RELEASE_PATH: /home/runner/debug.keystore
-          GODOT_ANDROID_KEYSTORE_RELEASE_USER: androiddebugkey
-          GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD: android
+          name="Android"
+          platform="Android"
+          runnable=true
+          advanced_options=false
+          dedicated_server=false
+          custom_features=""
+          export_filter="all_resources"
+          include_filter=""
+          exclude_filter=""
+          export_path="build/nujoom.apk"
+          encryption_include_filters=""
+          encryption_exclude_filters=""
+          encrypt_pck=false
+          encrypt_directory=false
+
+          [preset.0.options]
+
+          gradle_build/use_gradle_build=false
+          package/unique_name="com.nujoom.iraq"
+          package/name="نجوم العراق"
+          package/signed=true
+          version/code=1
+          version/name="1.0"
+          architectures/armeabi-v7a=false
+          architectures/arm64-v8a=true
+          architectures/x86=false
+          architectures/x86_64=false
+          screen/immersive_mode=true
+          permissions/internet=true
+          EOT
+          sed -i 's/^ *//' export_presets.cfg
+
+      - name: Import + Export APK
         run: |
-          mkdir -p .godot build
-          echo "res://nujoom.gdextension" > .godot/extension_list.cfg
-          touch build/.gdignore
+          export PATH=$HOME/godot-bin:$PATH
+          mkdir -p build
           godot --headless --path . --import || true
-          godot --headless --path . --import || true
-          godot --headless --path . --export-release "Android" build/nujoom.apk
+          godot --headless --path . --export-debug "Android" build/nujoom.apk
           ls -la build
 
       - uses: actions/upload-artifact@v4
