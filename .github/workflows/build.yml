@@ -77,14 +77,21 @@ jobs:
       - name: Build C++ library (Android arm64, debug only)
         run: |
           mkdir -p bin
-          scons platform=android arch=arm64 target=template_debug -j$(nproc)
-          # the .gdextension also lists a release library; reuse debug one so nothing is missing
-          cp bin/libnujoom.android.template_debug.arm64.so bin/libnujoom.android.template_release.arm64.so
-          ls -la bin
+          # link the C++ runtime statically so the phone does not need libc++_shared.so
+          grep -q "static-libstdc++" SConstruct || sed -i '/env.Append(CPPPATH/a env.Append(LINKFLAGS=["-static-libstdc++"])' SConstruct
+          scons platform=android arch=arm64 target=template_debug use_static_cpp=yes -j$(nproc)
+          SO=bin/libnujoom.android.template_debug.arm64.so
           echo "--- library info ---"
-          file bin/libnujoom.android.template_debug.arm64.so
-          readelf -d bin/libnujoom.android.template_debug.arm64.so | grep -E "NEEDED|SONAME" || true
-          nm -D bin/libnujoom.android.template_debug.arm64.so | grep -c nujoom_init || true
+          readelf -d $SO | grep -E "NEEDED|SONAME" || true
+          if readelf -d $SO | grep -q "libc++_shared"; then
+            echo "Still needs libc++_shared.so -> shipping it with the game as a dependency"
+            cp $ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so bin/
+            printf '\n[dependencies]\nandroid.debug.arm64 = {"res://bin/libc++_shared.so": ""}\nandroid.release.arm64 = {"res://bin/libc++_shared.so": ""}\n' >> nujoom.gdextension
+            cat nujoom.gdextension
+          fi
+          # the .gdextension also lists a release library; reuse debug one so nothing is missing
+          cp $SO bin/libnujoom.android.template_release.arm64.so
+          ls -la bin
 
       # save the compile cache even if a later step fails, so a rerun resumes fast
       - name: Save godot-cpp cache
@@ -223,7 +230,7 @@ jobs:
 
       - name: Check APK contains the C++ library
         run: |
-          unzip -l build/nujoom.apk | grep -E "libnujoom|libgodot" || true
+          unzip -l build/nujoom.apk | grep -E "libnujoom|libc\+\+|libgodot" || true
           unzip -l build/nujoom.apk | grep -q "libnujoom" || (echo "ERROR: libnujoom.so is NOT inside the APK" && exit 1)
 
       - uses: actions/upload-artifact@v4
