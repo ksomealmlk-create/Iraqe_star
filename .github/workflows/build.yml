@@ -16,9 +16,13 @@ jobs:
 
       - name: Extract project from ZIP
         run: |
-          if [ -f Iraqestar_online.zip ]; then Z=Iraqestar_online.zip; else Z=Iraqestar.zip; fi
+          Z=$(ls -t *.zip | head -n1)
           echo "Using $Z"
-          unzip -o "$Z"
+          unzip -o -q "$Z" -d _proj
+          P=$(dirname "$(find _proj -name project.godot | head -n1)")
+          echo "Project dir: $P"
+          cp -a "$P"/. .
+          rm -rf _proj
           test -f nujoom.gdextension && test -f project.godot
 
       - uses: actions/setup-java@v4
